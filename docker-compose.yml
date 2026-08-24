@@ -1,0 +1,47 @@
+# Local stack: LiteLLM gateway + API.
+#
+#   cp .env.example .env   # then fill in AWS credentials and the MCP token
+#   docker compose up
+#
+# The frontend runs outside compose with `npm run dev`, because Vite's hot
+# reload is worth more during development than container parity.
+
+services:
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+      # Mount the host's AWS credentials read-only rather than copying keys
+      # into a .env file. One place holds the secret, and rotating it on the
+      # host is picked up here on the next restart.
+      - ${HOME}/.aws:/root/.aws:ro
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-interest-local}
+      AWS_REGION_NAME: ${AWS_REGION:-us-east-2}
+      AWS_DEFAULT_REGION: ${AWS_REGION:-us-east-2}
+      AWS_PROFILE: ${AWS_PROFILE:-default}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness',timeout=4)"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  backend:
+    build:
+      context: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      # Service name, not localhost: this resolves on the compose network.
+      LITELLM_BASE_URL: http://litellm:4000
+      LITELLM_API_KEY: ${LITELLM_MASTER_KEY:-sk-interest-local}
+      AGENT_MODEL: interest-agent
+      MCP_SERVER_URL: ${MCP_SERVER_URL}
+      MCP_SERVER_TOKEN: ${MCP_SERVER_TOKEN}
+    depends_on:
+      litellm:
+        condition: service_healthy

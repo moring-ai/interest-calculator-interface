@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# Secrets & local env
+.env
+.env.local
+litellm/.env
+
+# TLS trust bundle (machine-specific, see scripts/env.sh)
+.certs/
+
+# OS
+.DS_Store
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+tfplan
+*.tfplan
+
+# per-service env files generated on the host
+*.env
+!.env.example

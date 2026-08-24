@@ -1,0 +1,197 @@
+#cloud-config
+# Bootstraps the application host.
+#
+#   Caddy (ports 80/443)
+#     ├── /oauth2/*  -> oauth2-proxy         Google sign-in
+#     ├── forward_auth -> oauth2-proxy       gate on every other request
+#     ├── /api/*     -> backend
+#     └── /*         -> static frontend      (baked into the web image)
+#                        backend -> litellm -> AgentCore Runtime
+#
+# No AWS credentials are written to this machine. LiteLLM picks the instance
+# role up from IMDS, which is the whole reason the app runs on EC2 with a role
+# rather than with a mounted credentials file.
+
+package_update: true
+packages:
+  - docker
+  - jq
+
+write_files:
+  # Compose reads secrets through per-service env files rather than one shared
+  # file, so the API never sees the Google client secret and oauth2-proxy never
+  # sees the MCP token.
+  - path: /opt/interest-app/docker-compose.yml
+    permissions: "0644"
+    content: |
+      services:
+        web:
+          image: ${web_image}
+          restart: unless-stopped
+          ports:
+            - "80:80"
+            - "443:443"
+          env_file: [/opt/interest-app/web.env]
+          volumes:
+            - caddy_data:/data
+            - caddy_config:/config
+          depends_on: [oauth2-proxy, backend]
+
+        oauth2-proxy:
+          image: quay.io/oauth2-proxy/oauth2-proxy:v7.7.1
+          restart: unless-stopped
+          env_file: [/opt/interest-app/oauth2.env]
+          expose: ["4180"]
+
+        backend:
+          image: ${backend_image}
+          restart: unless-stopped
+          env_file: [/opt/interest-app/backend.env]
+          expose: ["8000"]
+          depends_on: [litellm]
+
+        litellm:
+          image: ghcr.io/berriai/litellm:main-stable
+          restart: unless-stopped
+          command: ["--config", "/app/config.yaml", "--port", "4000"]
+          env_file: [/opt/interest-app/litellm.env]
+          volumes:
+            - /opt/interest-app/litellm-config.yaml:/app/config.yaml:ro
+          expose: ["4000"]
+
+      volumes:
+        caddy_data:
+        caddy_config:
+
+  - path: /opt/interest-app/litellm-config.yaml
+    permissions: "0644"
+    content: |
+      # The gateway holds no static credentials: aws_region_name is set, and
+      # boto3 resolves the instance role from IMDS for the actual signing.
+      model_list:
+        - model_name: interest-agent
+          litellm_params:
+            model: bedrock/agentcore/${agent_runtime_arn}
+            aws_region_name: ${region}
+
+      general_settings:
+        master_key: os.environ/LITELLM_MASTER_KEY
+
+      litellm_settings:
+        request_timeout: 180
+        drop_params: true
+
+  - path: /opt/interest-app/refresh-env.sh
+    permissions: "0700"
+    content: |
+      #!/usr/bin/env bash
+      # Pulls every secret from SSM and writes the per-service env files.
+      # Re-run to pick up a rotated secret, then restart the stack.
+      set -euo pipefail
+
+      REGION="${region}"
+      DIR=/opt/interest-app
+
+      get() { aws ssm get-parameter --region "$REGION" --name "$1" --with-decryption \
+                --query 'Parameter.Value' --output text; }
+
+      COOKIE_SECRET="$(get "${cookie_secret_param}")"
+      LITELLM_KEY="$(get "${litellm_key_param}")"
+      GOOGLE_ID="$(get "${google_id_param}")"
+      GOOGLE_SECRET="$(get "${google_secret_param}")"
+      MCP_TOKEN="$(get "${mcp_token_param}")"
+
+      if [ "$GOOGLE_ID" = "PLACEHOLDER" ] || [ "$GOOGLE_SECRET" = "PLACEHOLDER" ]; then
+        echo "WARNING: Google OAuth credentials are still placeholders." >&2
+        echo "Run scripts/set-google-oauth.sh, then: systemctl restart interest-app" >&2
+      fi
+
+      umask 077
+
+      cat > "$DIR/web.env" <<EOF
+      APP_HOSTNAME=${app_hostname}
+      ACME_EMAIL=${acme_email}
+      EOF
+
+      cat > "$DIR/oauth2.env" <<EOF
+      OAUTH2_PROXY_PROVIDER=google
+      OAUTH2_PROXY_CLIENT_ID=$GOOGLE_ID
+      OAUTH2_PROXY_CLIENT_SECRET=$GOOGLE_SECRET
+      OAUTH2_PROXY_COOKIE_SECRET=$COOKIE_SECRET
+      OAUTH2_PROXY_EMAIL_DOMAINS=${allowed_email_domain}
+      OAUTH2_PROXY_REDIRECT_URL=https://${app_hostname}/oauth2/callback
+      OAUTH2_PROXY_HTTP_ADDRESS=0.0.0.0:4180
+      OAUTH2_PROXY_REVERSE_PROXY=true
+      OAUTH2_PROXY_SET_XAUTHREQUEST=true
+      OAUTH2_PROXY_COOKIE_SECURE=true
+      OAUTH2_PROXY_SKIP_PROVIDER_BUTTON=true
+      OAUTH2_PROXY_WHITELIST_DOMAINS=${app_hostname}
+      OAUTH2_PROXY_UPSTREAMS=static://202
+      EOF
+
+      cat > "$DIR/backend.env" <<EOF
+      LITELLM_BASE_URL=http://litellm:4000
+      LITELLM_API_KEY=$LITELLM_KEY
+      AGENT_MODEL=interest-agent
+      MCP_SERVER_URL=${mcp_server_url}
+      MCP_SERVER_TOKEN=$MCP_TOKEN
+      EOF
+
+      cat > "$DIR/litellm.env" <<EOF
+      LITELLM_MASTER_KEY=$LITELLM_KEY
+      AWS_REGION_NAME=${region}
+      AWS_DEFAULT_REGION=${region}
+      EOF
+
+      chmod 600 "$DIR"/*.env
+      echo "env files refreshed"
+
+  - path: /opt/interest-app/start.sh
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      cd /opt/interest-app
+
+      ./refresh-env.sh
+
+      echo "==> Logging in to ECR"
+      aws ecr get-login-password --region "${region}" \
+        | docker login --username AWS --password-stdin "${registry}"
+
+      echo "==> Pulling images"
+      docker compose pull --quiet web backend || true
+
+      echo "==> Starting"
+      exec docker compose up --remove-orphans
+
+  - path: /etc/systemd/system/interest-app.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Interest Calculator app (Caddy + oauth2-proxy + API + LiteLLM)
+      After=docker.service network-online.target
+      Requires=docker.service
+      Wants=network-online.target
+
+      [Service]
+      # `docker compose up` without -d stays in the foreground, so systemd
+      # supervises the stack directly and restarts it if the daemon drops it.
+      Type=simple
+      WorkingDirectory=/opt/interest-app
+      ExecStart=/opt/interest-app/start.sh
+      ExecStop=/usr/bin/docker compose -f /opt/interest-app/docker-compose.yml down
+      Restart=always
+      RestartSec=15
+      TimeoutStartSec=600
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  - systemctl enable --now docker
+  - usermod -aG docker ec2-user
+  - systemctl daemon-reload
+  # Started even before images exist in ECR: Restart=always means it retries
+  # every 15s and comes up on its own once the first deploy pushes them.
+  - systemctl enable --now interest-app.service

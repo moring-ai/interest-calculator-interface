@@ -1,0 +1,112 @@
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------------------
+   Theme tokens.
+
+   Chart colours are declared here rather than in component code because the
+   backend labels every series with a semantic `role` ("interest", "principal",
+   "scenario0"). Mapping role -> colour in one place is what makes interest the
+   same amber in the mortgage chart, the comparison chart, and the savings
+   chart, so the reader learns the encoding once.
+--------------------------------------------------------------------------- */
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    Roboto, "Helvetica Neue", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+:root {
+  color-scheme: dark;
+
+  --bg: #0a0e13;
+  --surface: #121a23;
+  --surface-2: #18222d;
+  --border: #223040;
+  --border-strong: #2e4256;
+
+  --text: #e8eef5;
+  --text-muted: #8fa1b3;
+  --text-faint: #5f7183;
+
+  --accent: #4f9cf9;
+  --accent-soft: #1d3a5c;
+
+  /* Semantic chart roles */
+  --c-interest: #f0883e;   /* what it costs you */
+  --c-principal: #3fb950;  /* what you keep */
+  --c-balance: #58a6ff;    /* what you still owe */
+  --c-real: #bc8cff;       /* inflation-adjusted */
+  --c-rate: #39d0d8;       /* a rate over time */
+  --c-scenario0: #58a6ff;
+  --c-scenario1: #f0883e;
+  --c-scenario2: #3fb950;
+  --c-scenario3: #bc8cff;
+
+  --ok: #3fb950;
+  --warn: #d29922;
+  --danger: #f85149;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --bg: #f6f8fa;
+    --surface: #ffffff;
+    --surface-2: #f0f3f6;
+    --border: #d8dee4;
+    --border-strong: #b8c2cc;
+    --text: #1f2328;
+    --text-muted: #59636e;
+    --text-faint: #818b98;
+    --accent: #0969da;
+    --accent-soft: #ddf4ff;
+    --c-interest: #bc4c00;
+    --c-principal: #1a7f37;
+    --c-balance: #0969da;
+    --c-real: #8250df;
+    --c-rate: #0f7d8c;
+    --c-scenario0: #0969da;
+    --c-scenario1: #bc4c00;
+    --c-scenario2: #1a7f37;
+    --c-scenario3: #8250df;
+    --ok: #1a7f37;
+    --warn: #9a6700;
+    --danger: #cf222e;
+  }
+}
+
+html, body, #root { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "cv02", "cv03", "cv04", "tnum";
+}
+
+/* Tabular figures everywhere numbers are compared down a column. */
+.tnum { font-variant-numeric: tabular-nums; }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 5px;
+  border: 2px solid var(--bg);
+}
+::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
+
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+.animate-in { animation: fade-up 0.28s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+@keyframes pulse-soft { 50% { opacity: 0.45; } }
+.pulse-soft { animation: pulse-soft 1.4s ease-in-out infinite; }
+
+/* Recharts leaves a focus outline on the SVG wrapper when clicked. */
+.recharts-wrapper:focus, .recharts-surface:focus { outline: none; }

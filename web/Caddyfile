@@ -1,0 +1,70 @@
+# Edge for the whole application: TLS, Google SSO, static assets, API proxy.
+#
+# Everything is same-origin behind this file. The frontend calls "/api/..."
+# relatively, so serving the static build and proxying the API from one
+# hostname means there is no CORS to configure and production behaves exactly
+# like the Vite dev proxy does locally.
+#
+# APP_HOSTNAME is supplied by the environment so this image is not pinned to a
+# single deployment.
+
+{
+	admin off
+	# Let's Encrypt needs a real contact address for expiry notices.
+	email {$ACME_EMAIL:ops@moring.ai}
+}
+
+{$APP_HOSTNAME} {
+	encode zstd gzip
+
+	# --- oauth2-proxy's own endpoints -------------------------------------
+	# These must sit OUTSIDE the auth gate: the sign-in page and the OAuth
+	# callback have to be reachable by someone who is not yet authenticated,
+	# otherwise logging in requires already being logged in.
+	handle /oauth2/* {
+		reverse_proxy oauth2-proxy:4180 {
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	# --- the gate ---------------------------------------------------------
+	# Every request below is checked against oauth2-proxy first. A 401 sends
+	# the browser to Google; anything else falls through to the handlers.
+	forward_auth oauth2-proxy:4180 {
+		uri /oauth2/auth
+		header_up X-Real-IP {remote_host}
+
+		# Pass the signed-in identity downstream. The API ignores these today,
+		# but they are what per-user features would be built on, so the auth
+		# layer does not have to be revisited to add them.
+		copy_headers X-Auth-Request-Email>X-Forwarded-Email X-Auth-Request-User>X-Forwarded-User
+
+		@unauthorized status 401
+		handle_response @unauthorized {
+			redir * /oauth2/sign_in?rd={scheme}://{host}{uri}
+		}
+	}
+
+	# --- API --------------------------------------------------------------
+	handle /api/* {
+		reverse_proxy backend:8000 {
+			# The chat endpoint streams server-sent events. Without this Caddy
+			# buffers the response and the answer arrives all at once at the
+			# end, which looks like the app has hung.
+			flush_interval -1
+		}
+	}
+
+	# --- static frontend --------------------------------------------------
+	handle {
+		root * /srv
+		# Single-page app: unknown paths are routes, not missing files.
+		try_files {path} /index.html
+		file_server
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

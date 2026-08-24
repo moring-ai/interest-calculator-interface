@@ -1,0 +1,26 @@
+# LiteLLM gateway configuration.
+#
+# The backend never talks to AWS. It sends OpenAI-shaped chat completions to
+# this proxy, which holds the credentials and routes `interest-agent` to the
+# AgentCore runtime. Adding a model, changing the runtime, or putting a spend
+# limit on a key is a change here, not in application code.
+#
+# The `bedrock/agentcore/` prefix tells LiteLLM to call InvokeAgentRuntime
+# rather than a model inference API.
+
+model_list:
+  - model_name: interest-agent
+    litellm_params:
+      model: bedrock/agentcore/arn:aws:bedrock-agentcore:us-east-2:754039697525:runtime/InterestCalculatorAgent_InterestCalculatorAgent-sXxjxMB9xT
+      aws_region_name: us-east-2
+
+general_settings:
+  # Virtual keys the backend presents. Rotate by editing this list.
+  master_key: os.environ/LITELLM_MASTER_KEY
+
+litellm_settings:
+  # AgentCore turns can be slow: a tool call fetches live rates and builds a
+  # full amortization schedule before the model writes a word.
+  request_timeout: 180
+  drop_params: true
+  set_verbose: false

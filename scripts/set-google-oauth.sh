@@ -18,7 +18,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 TF_DIR="$HERE/../infra/app-host"
-REGION="${AWS_REGION:-us-east-2}"
+REGION="${AWS_REGION:-us-east-1}"
 
 if [ ! -d "$TF_DIR/.terraform" ]; then
     echo "Run 'terraform apply' in infra/app-host first." >&2

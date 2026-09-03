@@ -1,7 +1,7 @@
 variable "region" {
   description = "AWS region. Should match the region the AgentCore runtime lives in."
   type        = string
-  default     = "us-east-2"
+  default     = "us-east-1"
 }
 
 variable "name" {
@@ -45,15 +45,37 @@ variable "allowed_email_domain" {
 }
 
 variable "agent_runtime_arn" {
-  description = "AgentCore runtime the LiteLLM gateway invokes."
+  description = <<-EOT
+    AgentCore runtime the LiteLLM gateway invokes. Deliberately has no default:
+    an ARN carries an account and a region, so a stale default silently points a
+    new deployment at a different account's agent and the failure surfaces much
+    later as a confusing permissions error.
+
+    Get it after deploying the agent:
+      cd ../interest-calculator-agent && agentcore status
+  EOT
   type        = string
-  default     = "arn:aws:bedrock-agentcore:us-east-2:754039697525:runtime/InterestCalculatorAgent_InterestCalculatorAgent-sXxjxMB9xT"
+
+  validation {
+    condition     = can(regex("^arn:aws:bedrock-agentcore:[a-z0-9-]+:[0-9]{12}:runtime/", var.agent_runtime_arn))
+    error_message = "agent_runtime_arn must be a full AgentCore runtime ARN."
+  }
 }
 
 variable "mcp_server_url" {
-  description = "MCP tool endpoint, from the agent repo: terraform output -raw mcp_url"
+  description = <<-EOT
+    MCP tool endpoint. No default for the same reason as the ARN: the hostname
+    is derived from the tool host's Elastic IP, so it changes with every account.
+
+    Get it from the agent repo:
+      cd ../interest-calculator-agent/infra/toolhive && terraform output -raw mcp_url
+  EOT
   type        = string
-  default     = "https://3-140-24-37.sslip.io/mcp"
+
+  validation {
+    condition     = can(regex("^https://", var.mcp_server_url))
+    error_message = "mcp_server_url must be an https:// URL."
+  }
 }
 
 variable "mcp_token_parameter" {

@@ -20,6 +20,20 @@ class Settings(BaseSettings):
         "http://localhost:4173", "http://127.0.0.1:4173",
     ]
 
+    # --- AICP governed Agent API ----------------------------------------
+    #: Full invoke URL for an agent hosted on the platform, e.g.
+    #: https://demo.aicp.moring.ai/api/v1/agents/calc-interest-agent/invoke
+    #:
+    #: Preferred over the LiteLLM route when set. A platform-hosted runtime is
+    #: locked to a JWT authorizer, so the SigV4 signing that LiteLLM's
+    #: bedrock/agentcore route performs is refused outright -- the platform
+    #: authenticates the caller, checks per-agent authorization, and signs the
+    #: AgentCore call itself. Nothing here ever holds AWS credentials.
+    aicp_agent_url: str = ""
+    #: Keycloak access token for the platform account. Same identity used to
+    #: sign in to the dashboard.
+    aicp_access_token: str = ""
+
     # --- LiteLLM gateway -------------------------------------------------
     #: Base URL of the LiteLLM proxy. Inside docker-compose this is the service
     #: name; running the API on the host it is localhost.
@@ -38,7 +52,13 @@ class Settings(BaseSettings):
     mcp_timeout_seconds: int = 60
 
     @property
+    def uses_aicp(self) -> bool:
+        return bool(self.aicp_agent_url)
+
+    @property
     def agent_configured(self) -> bool:
+        if self.uses_aicp:
+            return bool(self.aicp_access_token)
         return bool(self.litellm_base_url and self.agent_model)
 
     @property

@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 CA_BUNDLE_VARS = ("MCP_CA_BUNDLE", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE")
 
 
-def _verify() -> str | bool:
+def resolve_ca_bundle() -> str | bool:
     for var in CA_BUNDLE_VARS:
         path = os.environ.get(var, "").strip()
         if path and os.path.isfile(path):
@@ -56,7 +56,7 @@ def _http_client_factory(
         headers=headers,
         timeout=timeout if timeout is not None else httpx.Timeout(30.0),
         auth=auth,
-        verify=_verify(),
+        verify=resolve_ca_bundle(),
         follow_redirects=True,
     )
 

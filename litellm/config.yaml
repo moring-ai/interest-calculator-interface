@@ -11,8 +11,8 @@
 model_list:
   - model_name: interest-agent
     litellm_params:
-      model: bedrock/agentcore/arn:aws:bedrock-agentcore:us-east-2:754039697525:runtime/InterestCalculatorAgent_InterestCalculatorAgent-sXxjxMB9xT
-      aws_region_name: us-east-2
+      model: bedrock/agentcore/arn:aws:bedrock-agentcore:us-east-1:603011031216:runtime/aicp_demo_calc_interest_agent_agentcore-ODQRdpGZJQ
+      aws_region_name: us-east-1
 
 general_settings:
   # Virtual keys the backend presents. Rotate by editing this list.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -33,6 +34,18 @@ class Settings(BaseSettings):
     #: Keycloak access token for the platform account. Same identity used to
     #: sign in to the dashboard.
     aicp_access_token: str = ""
+
+    @property
+    def aicp_token_url(self) -> str:
+        """Where to mint an agent-scoped bearer.
+
+        Derived from the invoke URL so only one value has to be configured;
+        the platform exposes /token and /invoke as siblings on the same agent.
+        """
+        explicit = os.environ.get("AICP_TOKEN_URL", "").strip()
+        if explicit:
+            return explicit
+        return self.aicp_agent_url.rstrip("/").removesuffix("/invoke") + "/token"
 
     # --- LiteLLM gateway -------------------------------------------------
     #: Base URL of the LiteLLM proxy. Inside docker-compose this is the service

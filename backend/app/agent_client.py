@@ -2,22 +2,23 @@
 
 Two routes, chosen by configuration:
 
-1. **The platform Agent API** (`AICP_AGENT_URL`). Used when the agent is hosted
-   on AICP. The platform authenticates the caller with Keycloak, checks
-   `can_call` on that specific agent, and signs the AgentCore invocation
-   server-side -- this process never holds AWS credentials or the runtime ARN.
-   Required rather than optional for a platform-hosted agent: its runtime is
-   locked to a JWT authorizer, so the SigV4 signing that route 2 performs is
-   refused with an authorization-method mismatch.
+1. **Token vending** (`AICP_AGENT_URL`). Used when the agent is hosted on AICP.
+   The platform mints a short-lived bearer scoped to one agent, and the runtime
+   is then called directly with it. This is the only route that works for a
+   platform-hosted agent: its runtime uses a JWT authorizer, so anything
+   presenting a SigV4 signature is refused with an authorization-method
+   mismatch -- including the platform's own /invoke proxy, which signs.
+
+   Calling the runtime directly also returns the agent's real event stream
+   rather than a flattened answer, so text arrives incrementally.
 
 2. **A LiteLLM gateway** speaking OpenAI chat-completions, which routes
    `interest-agent` to `bedrock/agentcore/{runtime_arn}`. Works when the runtime
    uses an AWS_IAM authorizer, which is what a CLI deploy into your own account
    produces.
 
-Either way the agent's rich event stream is flattened to text. Chart payloads
-survive because the agent emits them as fenced blocks, which `payload_parser`
-lifts back out -- see that module for why.
+Either way, chart payloads survive because the agent emits them as fenced
+blocks that `payload_parser` lifts back out -- see that module for why.
 
 The event protocol handed to the browser is unchanged from before the split:
 
@@ -88,74 +89,167 @@ def _extract_answer(body: Any) -> str:
     return ""
 
 
-async def _stream_via_aicp(message: str, session_id: str) -> AsyncIterator[dict]:
-    """Invoke a platform-hosted agent through its governed API.
+async def _vend_agent_token(client: httpx.AsyncClient) -> dict:
+    """Exchange the platform token for a short-lived, agent-scoped one.
 
-    The platform authenticates the caller with Keycloak, checks `can_call` on
-    this agent, and signs the AgentCore invocation server-side. The response
-    arrives whole rather than streamed, so the payload parser sees it as a
-    single chunk -- which it handles the same as any other chunking.
+    The runtime is configured with a JWT authorizer, so it expects a bearer
+    token -- not a SigV4 signature. The platform's own /invoke proxy signs with
+    SigV4 and is therefore refused by its own runtime, which is why this takes
+    the token-vending path instead: mint a bearer scoped to this one agent and
+    call AgentCore directly with it.
+
+    Returns the platform's response: access_token, expires_in, invoke_url and
+    session_header.
     """
+    settings = get_settings()
+    token_url = settings.aicp_token_url
+    response = await client.post(
+        token_url,
+        json={},
+        headers={
+            "Authorization": f"Bearer {settings.aicp_access_token}",
+            "Content-Type": "application/json",
+        },
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def _text_from_agent_event(event: dict) -> str:
+    """Pull assistant text out of one raw AgentCore stream event.
+
+    Calling the runtime directly returns the agent's own event stream rather
+    than a flattened answer, so the text arrives in the same shape the agent
+    emits it -- including the fenced payload blocks the parser is looking for.
+    """
+    inner = event.get("event", event)
+    if not isinstance(inner, dict):
+        return ""
+    delta = inner.get("contentBlockDelta", {}).get("delta", {})
+    if isinstance(delta, dict) and isinstance(delta.get("text"), str):
+        return delta["text"]
+    return ""
+
+
+async def _stream_via_aicp(message: str, session_id: str) -> AsyncIterator[dict]:
+    """Invoke a platform-hosted agent using a vended, agent-scoped token."""
     settings = get_settings()
     seen_tools: set[str] = set()
 
-    payload = {"payload": {"prompt": message}, "session_id": session_id}
-    headers = {
-        "Authorization": f"Bearer {settings.aicp_access_token}",
-        "Content-Type": "application/json",
-    }
+    parser = PayloadStreamParser()
+
+    def announce(event: dict):
+        """Emit a tool_start the first time each tool reports a result."""
+        out = []
+        if event["type"] == "tool_result":
+            name = event.get("name", "tool")
+            if name not in seen_tools:
+                seen_tools.add(name)
+                out.append({"type": "tool_start", "name": name})
+        out.append(event)
+        return out
 
     try:
         async with httpx.AsyncClient(
             timeout=settings.agent_timeout_seconds, verify=resolve_ca_bundle()
         ) as client:
-            response = await client.post(
-                settings.aicp_agent_url, json=payload, headers=headers
-            )
+            # --- 1. mint an agent-scoped bearer -------------------------------
+            try:
+                vended = await _vend_agent_token(client)
+            except httpx.HTTPStatusError as exc:
+                code = exc.response.status_code
+                if code == 401:
+                    yield {"type": "error", "message":
+                           "The platform rejected the access token. It is short "
+                           "lived -- refresh the dashboard and update "
+                           "AICP_ACCESS_TOKEN."}
+                elif code == 403:
+                    yield {"type": "error", "message":
+                           "Authenticated, but this account lacks can_call on "
+                           "the agent. Request access in the platform."}
+                else:
+                    log.error("token vending failed %s: %s", code,
+                              exc.response.text[:300])
+                    yield {"type": "error", "message":
+                           f"Could not mint an agent token ({code}): "
+                           f"{exc.response.text[:160]}"}
+                return
+
+            token = vended.get("access_token")
+            invoke_url = vended.get("invoke_url")
+            session_header = vended.get(
+                "session_header", "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id")
+            if not token or not invoke_url:
+                log.error("unexpected token response: %s",
+                          json.dumps(vended, default=str)[:300])
+                yield {"type": "error", "message":
+                       "The platform returned a token response this app could "
+                       "not read. See the API logs for the raw body."}
+                return
+
+            # --- 2. call the runtime directly with that bearer ----------------
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "Accept": "text/event-stream, application/json",
+                session_header: session_id,
+            }
+
+            async with client.stream(
+                "POST", invoke_url, json={"prompt": message}, headers=headers
+            ) as response:
+                if response.status_code >= 400:
+                    raw = (await response.aread()).decode("utf-8", "replace")
+                    log.error("runtime returned %s: %s", response.status_code, raw[:400])
+                    yield {"type": "error", "message":
+                           f"The agent runtime returned {response.status_code}: "
+                           f"{raw[:200]}"}
+                    return
+
+                content_type = response.headers.get("content-type", "")
+
+                if "text/event-stream" in content_type:
+                    async for line in response.aiter_lines():
+                        line = line.strip()
+                        if not line.startswith("data:"):
+                            continue
+                        blob = line[5:].strip()
+                        if not blob or blob == "[DONE]":
+                            continue
+                        try:
+                            event = json.loads(blob)
+                        except json.JSONDecodeError:
+                            continue
+                        text = _text_from_agent_event(event)
+                        if not text:
+                            continue
+                        for parsed in parser.feed(text):
+                            for out in announce(parsed):
+                                yield out
+                else:
+                    raw = (await response.aread()).decode("utf-8", "replace")
+                    try:
+                        answer = _extract_answer(json.loads(raw))
+                    except json.JSONDecodeError:
+                        answer = raw
+                    if not answer:
+                        log.warning("no answer in runtime response: %s", raw[:300])
+                        yield {"type": "error", "message":
+                               "The agent returned a response this app could not read."}
+                        return
+                    for parsed in parser.feed(answer):
+                        for out in announce(parsed):
+                            yield out
+
     except httpx.HTTPError as exc:
         log.error("AICP invoke failed: %s", exc)
         yield {"type": "error",
-               "message": f"Could not reach the platform Agent API: {exc}"}
+               "message": f"Could not reach the platform: {exc}"}
         return
 
-    if response.status_code == 401:
-        yield {"type": "error", "message":
-               "The platform rejected the access token. It may have expired -- "
-               "get a fresh Keycloak token and update AICP_ACCESS_TOKEN."}
-        return
-    if response.status_code == 403:
-        yield {"type": "error", "message":
-               "Authorized, but this account lacks can_call on the agent. "
-               "Request access to it in the platform."}
-        return
-    if response.status_code >= 400:
-        log.error("AICP returned %s: %s", response.status_code, response.text[:400])
-        yield {"type": "error", "message":
-               f"The platform returned {response.status_code}: {response.text[:200]}"}
-        return
-
-    try:
-        body = response.json()
-    except json.JSONDecodeError:
-        body = response.text
-
-    answer = _extract_answer(body)
-    if not answer:
-        log.warning("No answer field found in AICP response: %s",
-                    json.dumps(body, default=str)[:400])
-        yield {"type": "error",
-               "message": "The platform returned a response this app could not "
-                          "read. See the API logs for the raw body."}
-        return
-
-    parser = PayloadStreamParser()
-    for event in list(parser.feed(answer)) + list(parser.flush()):
-        if event["type"] == "tool_result":
-            name = event.get("name", "tool")
-            if name not in seen_tools:
-                seen_tools.add(name)
-                yield {"type": "tool_start", "name": name}
-        yield event
+    for parsed in parser.flush():
+        for out in announce(parsed):
+            yield out
 
     yield {"type": "done"}
 

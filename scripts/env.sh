@@ -35,7 +35,14 @@ _rr_setup() {
         return 0
     fi
 
-    CERTIFI="$(python3 -c 'import certifi; print(certifi.where())' 2>/dev/null)"
+    # The system python3 often lacks certifi; the project venv always has it
+    # (httpx depends on it). Try every interpreter rather than failing outright.
+    CERTIFI=""
+    for PY in "$REPO_ROOT/.venv/bin/python" python3 python; do
+        CERTIFI="$("$PY" -c 'import certifi; print(certifi.where())' 2>/dev/null)" || true
+        [ -n "$CERTIFI" ] && [ -f "$CERTIFI" ] && break
+        CERTIFI=""
+    done
     if [ -z "$CERTIFI" ] || [ ! -f "$CERTIFI" ]; then
         echo "Could not locate certifi's CA bundle. Run: python3 -m pip install certifi" >&2
         return 1

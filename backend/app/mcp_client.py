@@ -35,8 +35,17 @@ CA_BUNDLE_VARS = ("MCP_CA_BUNDLE", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE")
 
 
 def resolve_ca_bundle() -> str | bool:
-    for var in CA_BUNDLE_VARS:
-        path = os.environ.get(var, "").strip()
+    """Path to a CA bundle, or True for httpx's default trust.
+
+    Checks the settings object first. A value in .env is loaded by
+    pydantic-settings into Settings and never reaches os.environ, so reading
+    only the environment silently ignored it -- which showed up as
+    CERTIFICATE_VERIFY_FAILED whenever the shell had not exported it.
+    """
+    candidates = [get_settings().mcp_ca_bundle]
+    candidates += [os.environ.get(var, "") for var in CA_BUNDLE_VARS]
+    for path in candidates:
+        path = (path or "").strip()
         if path and os.path.isfile(path):
             return path
     return True

@@ -131,12 +131,48 @@ def _text_from_agent_event(event: dict) -> str:
     return ""
 
 
+def _error_from_agent_event(event: dict) -> str:
+    """Return an agent-side error carried in the stream, if there is one.
+
+    The runtime reports its own failures as `{"error": ..., "error_type": ...}`
+    events rather than a non-200 status. Ignoring those is why a broken agent
+    looked like a hang: the stream completed normally having produced no text,
+    so the UI showed a sent question and nothing else. Anything that stops the
+    agent answering should reach the user as words.
+    """
+    if not isinstance(event, dict):
+        return ""
+    error = event.get("error")
+    if not error:
+        return ""
+    if isinstance(error, dict):
+        error = error.get("message") or json.dumps(error, default=str)
+    kind = event.get("error_type")
+    return f"{kind}: {error}" if kind else str(error)
+
+
+def _explain_agent_error(raw: str) -> str:
+    """Translate the agent's own error into something actionable.
+
+    The MCP failure in particular arrives wrapped by anyio as "unhandled errors
+    in a TaskGroup", which names neither the tool server nor the reason.
+    """
+    if "Failed to start MCP client" in raw or "Failed to load tool" in raw:
+        return ("The agent could not connect to its tool server. Usually its "
+                "MCP_SERVER_TOKEN is wrong or its MCP_SERVER_URL is "
+                "unreachable -- check those on the agent in the platform. "
+                f"Underlying error: {raw[:200]}")
+    return f"The agent reported an error: {raw[:300]}"
+
+
 async def _stream_via_aicp(message: str, session_id: str) -> AsyncIterator[dict]:
     """Invoke a platform-hosted agent using a vended, agent-scoped token."""
     settings = get_settings()
     seen_tools: set[str] = set()
 
     parser = PayloadStreamParser()
+    saw_text = False
+    saw_error = False
 
     def announce(event: dict):
         """Emit a tool_start the first time each tool reports a result."""
@@ -220,9 +256,18 @@ async def _stream_via_aicp(message: str, session_id: str) -> AsyncIterator[dict]
                             event = json.loads(blob)
                         except json.JSONDecodeError:
                             continue
+                        agent_error = _error_from_agent_event(event)
+                        if agent_error:
+                            log.error("agent reported: %s", agent_error)
+                            yield {"type": "error",
+                                   "message": _explain_agent_error(agent_error)}
+                            saw_error = True
+                            continue
+
                         text = _text_from_agent_event(event)
                         if not text:
                             continue
+                        saw_text = True
                         for parsed in parser.feed(text):
                             for out in announce(parsed):
                                 yield out
@@ -250,6 +295,14 @@ async def _stream_via_aicp(message: str, session_id: str) -> AsyncIterator[dict]
     for parsed in parser.flush():
         for out in announce(parsed):
             yield out
+
+    if not saw_text and not saw_error:
+        # Completing with nothing at all previously rendered as a hang: the
+        # question sent, no answer, no explanation.
+        log.error("agent stream produced no text and no error")
+        yield {"type": "error", "message":
+               "The agent returned an empty response. It is deployed but "
+               "produced no output -- check its logs in the platform."}
 
     yield {"type": "done"}
 

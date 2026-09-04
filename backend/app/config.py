@@ -63,6 +63,10 @@ class Settings(BaseSettings):
     mcp_server_url: str = ""
     mcp_server_token: str = ""
     mcp_timeout_seconds: int = 60
+    #: CA bundle for outbound HTTPS. Needed on a network that terminates
+    #: TLS; httpx trusts only certifi otherwise. Read here as well as from
+    #: the environment, because a value in .env never reaches os.environ.
+    mcp_ca_bundle: str = ""
 
     @property
     def uses_aicp(self) -> bool:

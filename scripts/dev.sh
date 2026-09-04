@@ -20,6 +20,18 @@ for PORT in 8000 5173; do
     [ -n "$PIDS" ] && { echo "Freeing port $PORT"; kill $PIDS 2>/dev/null || true; sleep 1; }
 done
 
+# Vite 8 needs a Node with util.styleText (20.12+). The shell default here has
+# been both 20.11.0 and 20.18.1 at different times, and on the older one Vite
+# dies with "does not provide an export named 'styleText'" -- which reads like a
+# dependency bug rather than a version mismatch. Pin it from web/.nvmrc.
+if [ -s "$HOME/.nvm/nvm.sh" ]; then
+    # shellcheck disable=SC1091
+    . "$HOME/.nvm/nvm.sh"
+    (cd "$REPO_ROOT/web" && nvm use >/dev/null 2>&1) || true
+    nvm use "$(cat "$REPO_ROOT/web/.nvmrc" 2>/dev/null || echo 20.18.1)" >/dev/null 2>&1 || true
+fi
+echo "Node: $(node -v)"
+
 echo "==> Gateway"
 docker compose up -d litellm
 
